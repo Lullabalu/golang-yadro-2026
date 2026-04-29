@@ -2,6 +2,8 @@ package grpc
 
 import (
 	"context"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	updatepb "yadro.com/course/proto/update"
 	"yadro.com/course/update/core"
@@ -41,6 +43,9 @@ func (s *Server) Status(ctx context.Context, _ *emptypb.Empty) (*updatepb.Status
 
 func (s *Server) Update(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	err := s.service.Update(ctx)
+	if err == core.ErrUpdateAlreadyRunning {
+		return nil, status.Error(codes.AlreadyExists, "Обновление уже запущено")
+	}
 	return &emptypb.Empty{}, err
 }
 

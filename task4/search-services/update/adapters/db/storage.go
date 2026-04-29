@@ -6,6 +6,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
+	"slices"
 	"yadro.com/course/update/core"
 )
 
@@ -28,54 +29,51 @@ func New(log *slog.Logger, address string) (*DB, error) {
 	}, nil
 }
 
-func (db *DB) Add(ctx context.Context, comics core.Comics) error {
+func (db *DB) Add(ctx context.Context, comic core.Comics) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
+		db.log.Error("Транзакция не началась", "error", err)
 		return err
 	}
-	defer tx.Rollback()
+
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	_, err = tx.ExecContext(ctx, `
-    INSERT INTO comics (id, img_url)
-    VALUES ($1, $2)
-    ON CONFLICT (id) DO NOTHING
-`, comics.ID, comics.URL)
-
+		INSERT INTO comics (id, img_url)
+		VALUES ($1, $2)
+		ON CONFLICT (id) DO UPDATE SET img_url = EXCLUDED.img_url
+	`, comic.ID, comic.URL)
 	if err != nil {
+		db.log.Error("Не получилось вставить новый комикс в таблицу", "error", err)
 		return err
 	}
-
-	words := comics.Words
+	words := slices.Clone(comic.Words)
+	slices.Sort(words)
+	words = slices.Compact(words)
 
 	for _, word := range words {
-		_, err := tx.ExecContext(ctx, `
-		INSERT INTO words(word)
-		VALUES ($1)
-		ON CONFLICT (word) DO NOTHING
-		`, word)
+		var wordID int
 
-		if err != nil {
-			return err
-		}
-
-		var id int
 		err = tx.QueryRowContext(ctx, `
-			SELECT w.id 
-			FROM words w
-			WHERE w.word = $1
-		`, word).Scan(&id)
-
+			INSERT INTO words(word)
+			VALUES ($1)
+			ON CONFLICT (word) DO UPDATE SET word = EXCLUDED.word
+			RETURNING id
+		`, word).Scan(&wordID)
 		if err != nil {
+			db.log.Error("Не получилось вставить новое слово в таблицу", "error", err)
 			return err
 		}
 
 		_, err = tx.ExecContext(ctx, `
-		INSERT INTO comic_words(comic_id, word_id)
-		VALUES ($1, $2)
-		ON CONFLICT DO NOTHING
-		`, comics.ID, id)
-
+			INSERT INTO comic_words(comic_id, word_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, comic.ID, wordID)
 		if err != nil {
+			db.log.Error("Не получилось вставить новое соотношение comics <-> word в таблицу", err)
 			return err
 		}
 	}
@@ -94,6 +92,7 @@ func (db *DB) Stats(ctx context.Context) (core.DBStats, error) {
 	`).Scan(&ComicsFetched)
 
 	if err != nil {
+		db.log.Error("Не удалось узнать сколько комиксов в таблице", err)
 		return core.DBStats{}, err
 	}
 
@@ -103,6 +102,7 @@ func (db *DB) Stats(ctx context.Context) (core.DBStats, error) {
 	`).Scan(&WordsUnique)
 
 	if err != nil {
+		db.log.Error("Не удалось узнать сколько слов в таблице", err)
 		return core.DBStats{}, err
 	}
 
@@ -112,6 +112,7 @@ func (db *DB) Stats(ctx context.Context) (core.DBStats, error) {
 	`).Scan(&WordsTotal)
 
 	if err != nil {
+		db.log.Error("Не удалось узнать сколько связей word <-> comics в таблице", err)
 		return core.DBStats{}, err
 	}
 
@@ -125,6 +126,7 @@ func (db *DB) IDs(ctx context.Context) ([]int, error) {
 	`)
 
 	if err != nil {
+		db.log.Error("Не удалось получить rows айдишек", err)
 		return nil, err
 	}
 
@@ -137,6 +139,7 @@ func (db *DB) IDs(ctx context.Context) ([]int, error) {
 		err := rows.Scan(&id)
 
 		if err != nil {
+			db.log.Error("Не удалось считать айди", err)
 			return nil, err
 		}
 

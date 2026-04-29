@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"unicode"
 
 	"github.com/ilyakaznacheev/cleanenv"
 	"github.com/kljensen/snowball"
@@ -25,67 +26,81 @@ func (s *server) Ping(_ context.Context, in *emptypb.Empty) (*emptypb.Empty, err
 	return &emptypb.Empty{}, nil
 }
 
-var skip = map[string]struct{}{
-	"a": {}, "an": {}, "and": {}, "are": {}, "as": {}, "at": {},
-	"be": {}, "but": {}, "by": {}, "for": {}, "if": {}, "in": {},
-	"into": {}, "is": {}, "it": {}, "me": {}, "my": {}, "of": {},
-	"on": {}, "or": {}, "the": {}, "them": {}, "to": {}, "was": {},
-	"will": {}, "with": {}, "you": {}, "your": {}, "i": {}, "who": {}, "that": {},
+const maxMessageSize = 4 * 1024
+
+var stopWords = map[string]struct{}{
+	"a": {}, "an": {}, "the": {}, "and": {}, "or": {}, "but": {},
+	"of": {}, "in": {}, "on": {}, "at": {}, "to": {}, "for": {},
+	"me": {}, "your": {}, "them": {}, "who": {}, "that": {},
+	"is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {},
+	"will": {}, "would": {}, "can": {}, "could": {}, "should": {},
+	"i": {}, "you": {}, "he": {}, "she": {}, "it": {}, "we": {}, "they": {},
+
+	"и": {}, "а": {}, "но": {}, "или": {}, "в": {}, "во": {},
+	"на": {}, "с": {}, "со": {}, "к": {}, "ко": {}, "по": {},
+	"за": {}, "из": {}, "у": {}, "о": {}, "об": {}, "от": {},
+	"это": {}, "этот": {}, "эта": {}, "эти": {},
+	"я": {}, "ты": {}, "он": {}, "она": {}, "оно": {}, "мы": {}, "вы": {}, "они": {},
+	"буду": {}, "будешь": {}, "будет": {}, "будем": {}, "будете": {}, "будут": {},
+}
+
+func splitWords(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func detectLang(word string) string {
+	for _, r := range word {
+		if unicode.In(r, unicode.Cyrillic) {
+			return "russian"
+		}
+	}
+
+	return "english"
 }
 
 func (s *server) Norm(_ context.Context, in *wordspb.WordsRequest) (*wordspb.WordsReply, error) {
-	if len(in.GetPhrase()) > 4*1024 {
-		return nil, status.Error(codes.ResourceExhausted, "message len > 4 KiB")
-	}
-	splitter := func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
-	}
-
 	phrase := in.GetPhrase()
 
-	rawWords := strings.FieldsFunc(phrase, splitter)
+	if len([]byte(phrase)) > maxMessageSize {
+		return nil, status.Error(codes.ResourceExhausted, "message is larger than 4 KiB")
+	}
+	words := splitWords(phrase)
 
-	seen := make(map[string]struct{})
-	words := make([]string, 0, len(rawWords))
+	result := make([]string, 0)
+	existed := make(map[string]struct{}, len(words))
 
-	for _, w := range rawWords {
-		if w == "" {
+	for _, word := range words {
+		word = strings.ToLower(word)
+
+		if _, ok := stopWords[word]; ok {
 			continue
 		}
 
-		if _, ok := skip[w]; ok {
-			continue
-		}
+		lang := detectLang(word)
 
-		stemmed, err := snowball.Stem(w, "english", false)
+		stemmed, err := snowball.Stem(word, lang, true)
 		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, "invalid words")
+			stemmed = word
 		}
 
-		if stemmed == "oscow" {
-			stemmed = "moscow"
-		}
 		if stemmed == "" {
 			continue
 		}
-
-		if _, ok := skip[stemmed]; ok {
+		if _, ok := existed[stemmed]; ok {
 			continue
 		}
 
-		if _, ok := seen[stemmed]; ok {
-			continue
-		}
-
-		seen[stemmed] = struct{}{}
-		words = append(words, stemmed)
+		result = append(result, stemmed)
+		existed[stemmed] = struct{}{}
 	}
 
-	return &wordspb.WordsReply{Words: words}, nil
+	return &wordspb.WordsReply{Words: result}, nil
 }
 
 type ServerPort struct {
-	Port string `yaml:"words_address" env:"WORDS_ADDRESS" env-default:"8080"`
+	Port string `yaml:"words_address" env:"WORDS_ADDRESS" env-default:":1234"`
 }
 
 func GetPort(configPath string) (string, error) {

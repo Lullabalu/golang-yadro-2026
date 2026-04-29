@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 )
 
@@ -34,7 +33,20 @@ func NewService(
 	}, nil
 }
 
-func (s *Service) worker(ctx context.Context, jobs <-chan int, errCh chan<- error, wg *sync.WaitGroup) {
+func GetById(ctx context.Context, id int, xkcd XKCD) (XKCDInfo, error) {
+	if id == 404 {
+		return XKCDInfo{
+			ID:          404,
+			URL:         "",
+			Description: "",
+			Title:       "",
+		}, nil
+	}
+
+	return xkcd.Get(ctx, id)
+}
+
+func worker(ctx context.Context, jobs <-chan int, db DB, words Words, errors chan<- error, xkcd XKCD, wg *sync.WaitGroup, log *slog.Logger) {
 	defer wg.Done()
 
 	for {
@@ -46,52 +58,34 @@ func (s *Service) worker(ctx context.Context, jobs <-chan int, errCh chan<- erro
 				return
 			}
 
-			info, err := s.xkcd.Get(ctx, id)
+			info, err := GetById(ctx, id, xkcd)
+
 			if err != nil {
-				if strings.Contains(err.Error(), "404") {
-					comic := Comics{
-						ID:    id,
-						URL:   "",
-						Words: nil,
-					}
-					if err := s.db.Add(ctx, comic); err != nil {
-						select {
-						case errCh <- err:
-						default:
-						}
-						return
-					}
-
-					continue
-				}
-
+				log.Error("Не получилось скачать комикс $1", "id", id, "error", err)
 				select {
-				case errCh <- err:
-				default:
+				case errors <- err:
+				case <-ctx.Done():
+				}
+				return
+			}
+			curPhrase := info.Description + " " + info.Title
+			curWords, err := words.Norm(ctx, curPhrase)
+
+			if err != nil {
+				log.Error("Сервис words не отработал корректно", "error", err)
+				select {
+				case errors <- err:
+				case <-ctx.Done():
 				}
 				return
 			}
 
-			phrase := info.Title + " " + info.Description
-			words, err := s.words.Norm(ctx, phrase)
+			err = db.Add(ctx, Comics{ID: info.ID, Words: curWords, URL: info.URL})
 			if err != nil {
+				log.Error("База данных не отработало корректно", "error", err)
 				select {
-				case errCh <- err:
-				default:
-				}
-				return
-			}
-
-			comic := Comics{
-				ID:    info.ID,
-				URL:   info.URL,
-				Words: words,
-			}
-
-			if err := s.db.Add(ctx, comic); err != nil {
-				select {
-				case errCh <- err:
-				default:
+				case errors <- err:
+				case <-ctx.Done():
 				}
 				return
 			}
@@ -103,7 +97,7 @@ func (s *Service) Update(ctx context.Context) error {
 	s.mu.Lock()
 	if s.status == StatusRunning {
 		s.mu.Unlock()
-		return AMOGUS
+		return ErrUpdateAlreadyRunning
 	}
 	s.status = StatusRunning
 	s.mu.Unlock()
@@ -114,61 +108,53 @@ func (s *Service) Update(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	ids, err := s.db.IDs(ctx)
+	count, err := s.xkcd.LastID(ctx)
 	if err != nil {
+		s.log.Error("Не удалось получить общее число комиксов", "error", err)
 		return err
 	}
 
-	used := make(map[int]struct{}, len(ids))
-	for _, id := range ids {
-		used[id] = struct{}{}
-	}
-
-	total, err := s.xkcd.LastID(ctx)
-	if err != nil {
-		return err
-	}
-
-	updateCtx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs := make(chan int)
-	errCh := make(chan error, 1)
+	jobs := make(chan int, s.concurrency)
+	errs := make(chan error, 1)
 
 	var wg sync.WaitGroup
+
 	for i := 0; i < s.concurrency; i++ {
 		wg.Add(1)
-		go s.worker(updateCtx, jobs, errCh, &wg)
+		go worker(ctx, jobs, s.db, s.words, errs, s.xkcd, &wg, s.log)
 	}
 
 	go func() {
 		defer close(jobs)
-		for num := 1; num <= total; num++ {
-			if _, ok := used[num]; ok {
-				continue
-			}
 
+		for id := 1; id <= count; id++ {
 			select {
-			case <-updateCtx.Done():
+			case jobs <- id:
+			case <-ctx.Done():
 				return
-			case jobs <- num:
 			}
 		}
 	}()
 
 	done := make(chan struct{})
+
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
 	select {
-	case err := <-errCh:
+	case <-done:
+		return nil
+
+	case err := <-errs:
 		cancel()
 		<-done
 		return err
-	case <-done:
-		return nil
+
 	case <-ctx.Done():
 		cancel()
 		<-done
@@ -203,7 +189,7 @@ func (s *Service) Drop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.status == StatusRunning {
 		s.mu.Unlock()
-		return AMOGUS
+		return ErrUpdateAlreadyRunning
 	}
 	s.mu.Unlock()
 

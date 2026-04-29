@@ -5,4 +5,4 @@ import "errors"
 var ErrBadArguments = errors.New("arguments are not acceptable")
 var ErrAlreadyExists = errors.New("resource or task already exists")
 var ErrNotFound = errors.New("resource is not found")
-var AMOGUS = errors.New("AMOGUS")
+var ErrUpdateAlreadyRunning = errors.New("Update already running")

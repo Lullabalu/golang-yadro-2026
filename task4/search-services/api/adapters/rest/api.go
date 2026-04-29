@@ -2,9 +2,10 @@ package rest
 
 import (
 	"encoding/json"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"yadro.com/course/api/core"
 )
@@ -22,6 +23,7 @@ func NewPingHandler(log *slog.Logger, pingers map[string]core.Pinger) http.Handl
 		for service, pinger := range pingers {
 			err := pinger.Ping(r.Context())
 			if err == nil {
+				log.Error("Не удалось пингануть сервер", "server", service, "error", err)
 				response.Replies[service] = "ok"
 			} else {
 				response.Replies[service] = "unavailable"
@@ -39,12 +41,11 @@ func NewUpdateHandler(log *slog.Logger, updater core.Updater) http.HandlerFunc {
 		err := updater.Update(r.Context())
 
 		if err != nil {
-			log.Error("update failed", "err", err)
-			if strings.Contains(err.Error(), "AMOGUS") {
+			if status.Code(err) == codes.AlreadyExists {
 				w.WriteHeader(http.StatusAccepted)
 				return
 			}
-
+			log.Error("update failed", "err", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
