@@ -25,7 +25,7 @@ func main() {
 	cfg := config.MustLoad(configPath)
 	fmt.Println(cfg)
 
-	log := mustMakeLogger("log level from config")
+	log := mustMakeLogger(cfg.LogLevel)
 
 	log.Info("starting server")
 	log.Debug("debug messages are enabled")
@@ -63,7 +63,7 @@ func main() {
 			log.Error("server closed unexpectedly", "error", err)
 			return
 		}
-	}	
+	}
 
 }
 
