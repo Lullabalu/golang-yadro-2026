@@ -1,0 +1,4 @@
+search_addres: localhost:8080
+words_address: words:8080
+db_address: localhost:1234
+index_ttl: 20s

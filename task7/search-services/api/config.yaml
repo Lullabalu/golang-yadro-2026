@@ -1,0 +1,7 @@
+log_level: DEBUG
+words_address:  words:8080
+update_address:  update:8080
+search_address: search:8080
+api_server:
+  address: localhost:80
+  timeout: 5s
